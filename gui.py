@@ -1,11 +1,5 @@
 # gui_prefixspan.py
 # PyQt6 GUI wrapper for your PrefixSpan implementation
-# - Algorithm selector (extensible)
-# - Input CSV picker
-# - Output file picker
-# - minsup (relative) & max pattern length inputs
-# - Shows elapsed time and number of patterns
-# - Runs mining in a background thread (no UI freeze)
 
 from __future__ import annotations
 
@@ -21,7 +15,6 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -30,7 +23,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
-    QSizePolicy,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -48,6 +40,7 @@ class RunConfig:
     output_file: str
     minsup_relative: float
     max_pattern_length: int
+    min_len: int
 
 
 class MinerWorker(QThread):
@@ -85,12 +78,12 @@ class MinerWorker(QThread):
 
     # --- Individual runners ---
     def _run_prefixspan(self, cfg: RunConfig) -> tuple[int, int]:
-        algo = PrefixSpan(maximum_pattern_length=cfg.max_pattern_length)
+        algo = PrefixSpan(maximum_pattern_length=cfg.max_pattern_length, min_len=cfg.min_len)
         self.progress_log.emit(
             f"Running PrefixSpan on '{cfg.input_csv}' -> '{cfg.output_file}'\n"
         )
         self.progress_log.emit(
-            f"minsup (rel) = {cfg.minsup_relative}, max_len = {cfg.max_pattern_length}\n"
+            f"minsup (rel) = {cfg.minsup_relative}, max_len = {cfg.max_pattern_length}, min_len = {cfg.min_len}\n"
         )
         algo.run(cfg.input_csv, cfg.minsup_relative, cfg.output_file)
         return algo.total_time_ms, algo.pattern_count
@@ -122,6 +115,11 @@ class MainWindow(QMainWindow):
         self.spin_maxlen.setRange(1, 100000)
         self.spin_maxlen.setValue(10)
         self.spin_maxlen.setToolTip("Maximum pattern length")
+
+        self.spin_minlen = QSpinBox()
+        self.spin_minlen.setRange(1, 100000)
+        self.spin_minlen.setValue(1)  # default: behave like original
+        self.spin_minlen.setToolTip("Minimum pattern length to WRITE (by item count)")
 
         self.btn_run = QPushButton("Run")
         self.btn_run.setDefault(True)
@@ -157,6 +155,7 @@ class MainWindow(QMainWindow):
 
         form.addRow("minsup (rel)", self.spin_minsup)
         form.addRow("Max pattern length", self.spin_maxlen)
+        form.addRow("Min pattern length", self.spin_minlen)  
 
         params_box = QGroupBox("Run Configuration")
         params_box.setLayout(form)
@@ -217,6 +216,7 @@ class MainWindow(QMainWindow):
             output_file=output_file,
             minsup_relative=float(self.spin_minsup.value()),
             max_pattern_length=int(self.spin_maxlen.value()),
+            min_len=int(self.spin_minlen.value()),
         )
 
         self.txt_log.clear()
@@ -237,6 +237,7 @@ class MainWindow(QMainWindow):
         self.combo_algo.setEnabled(not running)
         self.spin_minsup.setEnabled(not running)
         self.spin_maxlen.setEnabled(not running)
+        self.spin_minlen.setEnabled(not running)
         self.progress.setRange(0, 0 if running else 1)  # busy vs idle
         self.lbl_status.setText("Running…" if running else "Idle")
 
