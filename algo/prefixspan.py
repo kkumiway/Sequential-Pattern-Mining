@@ -4,10 +4,11 @@ from time import time
 from utils.sequence_utils import SequenceDatabase, PseudoSequence
 
 class PrefixSpan:
-    def __init__(self, maximum_pattern_length: int = 1000):
+    def __init__(self, maximum_pattern_length: int = 1000, min_len: int = 1):
         self.total_time_ms = 0
         self.pattern_count = 0
         self.max_len = maximum_pattern_length
+        self.min_len = max(1, int(min_len))
 
         self._minsupp_abs = 1
         self._db = None
@@ -66,7 +67,19 @@ class PrefixSpan:
             self._prefixspan_with_single_items(map_item_to_sids)
 
     # ---------------------- Utilities ----------------------
+    def _pattern_length_in_buffer(self, tokens_end_idx: int) -> int:
+        """버퍼에 기록된 현재 패턴의 아이템 개수(양수 토큰 수)를 길이로 정의"""
+        length = 0
+        for i in range(tokens_end_idx + 1):
+            if self._buffer[i] > 0:
+                length += 1
+        return length
+
     def _write_pattern_tokens(self, tokens_end_idx: int, pseudo_sequences: list[PseudoSequence]):
+        # min_len 필터: 출력 단계에서만 적용 (탐색/재귀는 그대로)
+        if self._pattern_length_in_buffer(tokens_end_idx) < self.min_len:
+            return
+
         self.pattern_count += 1
         support = len(pseudo_sequences)
 
@@ -88,8 +101,10 @@ class PrefixSpan:
         pattern_str = " ".join(pattern).ljust(self._pretty_pad)
         self._writer.write(f"{pattern_str} #SUP: {support}\n")
 
-
     def _write_single(self, item: int, support: int):
+        # 단일 아이템 패턴은 길이 1, min_len > 1 이면 출력 생략
+        if self.min_len > 1:
+            return
         self.pattern_count += 1
         pattern_str = f"{{{item}}}".ljust(self._pretty_pad)
         self._writer.write(f"{pattern_str} #SUP: {support}\n")
@@ -304,6 +319,6 @@ class PrefixSpan:
 
 
 if __name__ == "__main__":
-    algo = PrefixSpan(maximum_pattern_length=10)
+    algo = PrefixSpan(maximum_pattern_length=10, min_len=1)
     # algo.run("small.csv", minsup_relative=0.5, output_file="patterns.txt")
     pass
