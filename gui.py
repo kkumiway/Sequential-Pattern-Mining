@@ -32,6 +32,21 @@ from PyQt6.QtWidgets import (
 # Import your algorithm(s)
 from algo.prefixspan import PrefixSpan
 
+# ---------------- Logging bridge (Python logging -> Qt signal) ----------------
+import logging
+
+class QtSignalHandler(logging.Handler):
+    def __init__(self, signal):
+        super().__init__()
+        self.signal = signal
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.signal.emit(msg)
+        except Exception:
+            pass
+
 
 @dataclass
 class RunConfig:
@@ -41,6 +56,12 @@ class RunConfig:
     minsup_relative: float
     max_pattern_length: int
     min_len: int
+    n_jobs: int = 1
+    log_level: str = "INFO"
+    # INFO-friendly knobs (match algo.prefixspan.PrefixSpan __init__)
+    info_depth_every: int = 5
+    info_pattern_every: int = 5000
+    info_preview_items: int = 5
 
 
 class MinerWorker(QThread):
@@ -57,6 +78,19 @@ class MinerWorker(QThread):
         self.cfg = cfg
 
     def run(self) -> None:
+        # Attach logging handler so prefixspan logs appear in GUI
+        logger = logging.getLogger("prefixspan")
+        handler = QtSignalHandler(self.progress_log)
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(asctime)s %(name)s: %(message)s"))
+        # show all, final filtering by logger level below
+        handler.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        # set logger level from GUI selection
+        try:
+            logger.setLevel(getattr(logging, self.cfg.log_level.upper(), logging.INFO))
+        except Exception:
+            logger.setLevel(logging.INFO)
+
         try:
             self.started_log.emit("Starting mining...\n")
             algo_key = self.cfg.algorithm_key
@@ -75,15 +109,32 @@ class MinerWorker(QThread):
         except Exception as e:
             tb = traceback.format_exc()
             self.error.emit(f"Error: {e}\n\n{tb}")
+        finally:
+            # Detach handler to avoid duplicates on next run
+            logger.removeHandler(handler)
+            handler.close()
 
     # --- Individual runners ---
     def _run_prefixspan(self, cfg: RunConfig) -> tuple[int, int]:
-        algo = PrefixSpan(maximum_pattern_length=cfg.max_pattern_length, min_len=cfg.min_len)
+        # Pass INFO-friendly knobs to PrefixSpan as well
+        algo = PrefixSpan(
+            maximum_pattern_length=cfg.max_pattern_length,
+            min_len=cfg.min_len,
+            n_jobs=cfg.n_jobs,
+            log_level=cfg.log_level,
+            # DEBUG knobs keep defaults; we forward INFO knobs:
+            info_depth_every=cfg.info_depth_every,
+            info_pattern_every=cfg.info_pattern_every,
+            info_preview_items=cfg.info_preview_items,
+        )
         self.progress_log.emit(
             f"Running PrefixSpan on '{cfg.input_csv}' -> '{cfg.output_file}'\n"
         )
         self.progress_log.emit(
-            f"minsup (rel) = {cfg.minsup_relative}, max_len = {cfg.max_pattern_length}, min_len = {cfg.min_len}\n"
+            f"minsup (rel) = {cfg.minsup_relative}, max_len = {cfg.max_pattern_length}, "
+            f"min_len = {cfg.min_len}, n_jobs = {cfg.n_jobs}, log_level = {cfg.log_level}, "
+            f"info_depth_every = {cfg.info_depth_every}, info_pattern_every = {cfg.info_pattern_every}, "
+            f"info_preview_items = {cfg.info_preview_items}\n"
         )
         algo.run(cfg.input_csv, cfg.minsup_relative, cfg.output_file)
         return algo.total_time_ms, algo.pattern_count
@@ -93,7 +144,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sequential Pattern Mining GUI")
-        self.setMinimumSize(760, 560)
+        self.setMinimumSize(820, 600)
 
         # --- Widgets ---
         self.combo_algo = QComboBox()
@@ -118,14 +169,41 @@ class MainWindow(QMainWindow):
 
         self.spin_minlen = QSpinBox()
         self.spin_minlen.setRange(1, 100000)
-        self.spin_minlen.setValue(1)  # default: behave like original
+        self.spin_minlen.setValue(1)
         self.spin_minlen.setToolTip("Minimum pattern length to WRITE (by item count)")
+
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, 64)
+        self.spin_workers.setValue(1)
+        self.spin_workers.setToolTip("CPU workers (processes)")
+
+        # Log level
+        self.combo_loglevel = QComboBox()
+        self.combo_loglevel.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        self.combo_loglevel.setCurrentText("INFO")
+        self.combo_loglevel.setToolTip("Logging level for algorithm runtime")
+
+        # --- INFO-friendly knobs (new) ---
+        self.spin_info_depth_every = QSpinBox()
+        self.spin_info_depth_every.setRange(1, 1000)
+        self.spin_info_depth_every.setValue(5)
+        self.spin_info_depth_every.setToolTip("INFO: print compact depth progress every K depths")
+
+        self.spin_info_pattern_every = QSpinBox()
+        self.spin_info_pattern_every.setRange(1, 1_000_000_000)
+        self.spin_info_pattern_every.setValue(5000)
+        self.spin_info_pattern_every.setToolTip("INFO: print progress every N patterns written")
+
+        self.spin_info_preview_items = QSpinBox()
+        self.spin_info_preview_items.setRange(1, 100)
+        self.spin_info_preview_items.setValue(5)
+        self.spin_info_preview_items.setToolTip("INFO: number of items to preview in summaries")
 
         self.btn_run = QPushButton("Run")
         self.btn_run.setDefault(True)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 1)  # will switch to busy state (0,0) while running
+        self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
 
@@ -155,7 +233,17 @@ class MainWindow(QMainWindow):
 
         form.addRow("minsup (rel)", self.spin_minsup)
         form.addRow("Max pattern length", self.spin_maxlen)
-        form.addRow("Min pattern length", self.spin_minlen)  
+        form.addRow("Min pattern length", self.spin_minlen)
+        form.addRow("CPU workers", self.spin_workers)
+        form.addRow("Log level", self.combo_loglevel)
+
+        # INFO knobs in the same group
+        info_group = QGroupBox("Logging (INFO mode controls)")
+        info_form = QFormLayout()
+        info_form.addRow("Depth cadence (K)", self.spin_info_depth_every)
+        info_form.addRow("Pattern cadence (N)", self.spin_info_pattern_every)
+        info_form.addRow("Preview items", self.spin_info_preview_items)
+        info_group.setLayout(info_form)
 
         params_box = QGroupBox("Run Configuration")
         params_box.setLayout(form)
@@ -174,6 +262,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         v = QVBoxLayout(central)
         v.addWidget(params_box)
+        v.addWidget(info_group)
         v.addLayout(run_row)
         v.addLayout(stats_row)
         v.addWidget(self.txt_log, 1)
@@ -217,6 +306,11 @@ class MainWindow(QMainWindow):
             minsup_relative=float(self.spin_minsup.value()),
             max_pattern_length=int(self.spin_maxlen.value()),
             min_len=int(self.spin_minlen.value()),
+            n_jobs=int(self.spin_workers.value()),
+            log_level=self.combo_loglevel.currentText(),
+            info_depth_every=int(self.spin_info_depth_every.value()),
+            info_pattern_every=int(self.spin_info_pattern_every.value()),
+            info_preview_items=int(self.spin_info_preview_items.value()),
         )
 
         self.txt_log.clear()
@@ -225,7 +319,7 @@ class MainWindow(QMainWindow):
         self.worker = MinerWorker(cfg)
         self.worker.started_log.connect(self.append_log)
         self.worker.finished_log.connect(self.append_log)
-        self.worker.progress_log.connect(self.append_log)
+        # self.worker.progress_log.connect(self.append_log)
         self.worker.error.connect(self.on_error)
         self.worker.done.connect(self.on_done)
         self.worker.start()
@@ -238,6 +332,11 @@ class MainWindow(QMainWindow):
         self.spin_minsup.setEnabled(not running)
         self.spin_maxlen.setEnabled(not running)
         self.spin_minlen.setEnabled(not running)
+        self.spin_workers.setEnabled(not running)
+        self.combo_loglevel.setEnabled(not running)
+        self.spin_info_depth_every.setEnabled(not running)
+        self.spin_info_pattern_every.setEnabled(not running)
+        self.spin_info_preview_items.setEnabled(not running)
         self.progress.setRange(0, 0 if running else 1)  # busy vs idle
         self.lbl_status.setText("Running…" if running else "Idle")
 
